@@ -24,8 +24,10 @@
 #define FLUENTD_TAG            "/sensor"       // Fluentd tag
 #define WIFI_HOSTNAME          "ESP32-geiger"  // module's hostname
 
-#define WIFI_SSID              "XXXXXXXX"      // WiFi SSID
-#define WIFI_PASS              "XXXXXXXX"      // WiFi Password
+#include "wifi_config.h"
+// wifi_config.h should define followings.
+// #define WIFI_SSID "XXXXXXXX"            // WiFi SSID
+// #define WIFI_PASS "XXXXXXXX"            // WiFi Password
 
 #define GEIGER_UART_NUM        UART_NUM_2
 #define GEIGER_UART_TXD        GPIO_NUM_25
@@ -81,37 +83,35 @@ static cJSON *sense_json(float usvh, wifi_ap_record_t *ap_record)
     return root;
 }
 
-static int connect_server()
+static esp_err_t connect_server(int *sock)
 {
     struct sockaddr_in server;
-    int sock;
 
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    *sock = socket(AF_INET, SOCK_STREAM, 0);
 
     server.sin_family = AF_INET;
     server.sin_port = htons(FLUENTD_PORT);
     server.sin_addr.s_addr = inet_addr(FLUENTD_IP);
 
-    if (connect(sock, (struct sockaddr *)&server, sizeof(server)) != 0) {
+    if (connect(*sock, (struct sockaddr *)&server, sizeof(server)) != 0) {
         ESP_LOGE(TAG, "FLUENTD CONNECT FAILED errno=%d", errno);
-        return -1;
+        return ESP_FAIL;
     }
     ESP_LOGI(TAG, "FLUENTD CONNECT SUCCESS");
 
-    return sock;
+    return ESP_OK;
 }
 
-static void process_sense_data(float usvh)
+static esp_err_t process_sense_data(float usvh)
 {
     wifi_ap_record_t ap_record;
     char buffer[sizeof(EXPECTED_RESPONSE)];
+    esp_err_t ret = ESP_FAIL;
 
     ESP_ERROR_CHECK(esp_wifi_sta_get_ap_info(&ap_record));
 
-    int sock = connect_server();
-    if (sock == -1) {
-        return;
-    }
+    int sock = -1;
+    ESP_ERROR_CHECK(connect_server(&sock));
 
     cJSON *json = sense_json(usvh, &ap_record);
     char *json_str = cJSON_PrintUnformatted(json);
@@ -129,11 +129,14 @@ static void process_sense_data(float usvh)
             ESP_LOGE(TAG, "FLUENTD POST FAILED");
             break;
         }
+        ret = ESP_OK;
         ESP_LOGI(TAG, "FLUENTD POST SUCCESSFUL");
     } while (0);
 
     close(sock);
     cJSON_Delete(json);
+
+    return ret;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -205,7 +208,7 @@ static esp_err_t wifi_connect()
     if (xSemaphoreTake(wifi_conn_done, 10000 / portTICK_RATE_MS) == pdTRUE) {
         return ESP_OK;
     } else {
-        ESP_LOGE(TAG, "WIFI CONNECT TIMECOUT")
+        ESP_LOGE(TAG, "WIFI CONNECT TIMECOUT");
         return ESP_FAIL;
     }
 }
@@ -229,11 +232,10 @@ static void fluentd_post_task()
 
         ESP_LOGI(TAG, "uSv/h = %.3f", usvh);
 
-        if (wifi_connect() == ESP_OK) {
-            process_sense_data(usvh);
-        }
-        wifi_disconnect();
+        ESP_ERROR_CHECK(wifi_connect());
+        process_sense_data(usvh);
 
+        wifi_disconnect();
     }
 }
 
@@ -275,6 +277,8 @@ static void uart_read_task()
 //////////////////////////////////////////////////////////////////////
 void app_main()
 {
+    ESP_LOGI(TAG, "APP START");
+
     vSemaphoreCreateBinary(sense_done);
     vSemaphoreCreateBinary(wifi_conn_done);
 
